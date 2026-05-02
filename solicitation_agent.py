@@ -1,5 +1,7 @@
 import anthropic
 import urllib.request
+from dotenv import load_dotenv
+load_dotenv()
 import json
 from datetime import datetime, timedelta
 from google.oauth2.credentials import Credentials
@@ -82,7 +84,7 @@ def save_to_sheets(creds, report_text, sam_count, overlap_count):
 
 client = anthropic.Anthropic()
 
-sam_api_key = "SAM-3c4666d7-9d24-4d8d-b40f-7752e0e25206"
+sam_api_key = os.environ.get("SAM_API_KEY")
 
 NAICS_CODES = ["236220", "238310", "541330", "541712", "541715", "238190", "332311"]
 KEYWORDS = ["envelope", "insulation", "retrofit", "additive", "3D print", "weatheriz", "energy effici", "building", "prefabricated", "modular", "rapid construction", "innovative construction", "building retrofit", "facility modernization", "energy resilience", "renovation", "enclosure", "cladding", "facade", "panel", "building modernization", "facility renovation", "energy conservation", "deep energy", "thermal envelope", "prefabricated construction", "modular building", "MILCON", "ESPC"]
@@ -424,6 +426,6 @@ output = re.sub(r'[^\x00-\x7F]+', '', output)
 print(output.encode('utf-8', errors='replace').decode('utf-8'))
 
 creds = get_google_credentials()
-sheet_url = f"https://docs.google.com/spreadsheets/d/{open('sheet_id.txt').read().strip()}"
+sheet_url = f"https://docs.google.com/spreadsheets/d/{os.environ.get('GOOGLE_SHEET_ID')}"
 save_to_sheets(creds, output, len(opportunities), overlap_count)
 send_email_report(output, sheet_url)

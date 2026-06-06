@@ -124,12 +124,22 @@ def search_sam_by_naics(naics_codes):
 def search_sbir(keywords):
     print(f"\nSearching SBIR.gov for open topics...")
     results = []
-    
+    api_errors = []
+
     for keyword in keywords:
         url = f"https://api.www.sbir.gov/public/api/topics?keyword={keyword.replace(' ', '%20')}&status=open"
         try:
             response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+            if response.status_code == 403:
+                api_errors.append(f"403 Forbidden — API may require authentication or be under maintenance")
+                break
+            elif response.status_code != 200:
+                api_errors.append(f"HTTP {response.status_code} for keyword '{keyword}'")
+                continue
             data = response.json()
+            if isinstance(data, dict) and "message" in data:
+                api_errors.append(f"API message: {data['message']}")
+                break
             topics = data if isinstance(data, list) else data.get("topics", [])
             for topic in topics[:5]:
                 results.append(
@@ -140,17 +150,28 @@ def search_sbir(keywords):
                     f"Description: {str(topic.get('tech_abstract', 'N/A'))[:300]}\n"
                     f"Link: https://www.sbir.gov/node/{topic.get('nid', '')}\n"
                 )
+        except requests.exceptions.Timeout:
+            api_errors.append(f"Timeout on keyword '{keyword}'")
         except Exception as e:
-            print(f"Error searching SBIR for '{keyword}': {str(e)}")
-    
+            api_errors.append(f"Error on keyword '{keyword}': {str(e)}")
+
+    if api_errors:
+        unique_errors = list(dict.fromkeys(api_errors))
+        print(f"SBIR API issues: {'; '.join(unique_errors)}")
+
     seen = set()
     unique_results = []
     for r in results:
         if r not in seen:
             seen.add(r)
             unique_results.append(r)
-    
-    return "\n".join(unique_results) if unique_results else "No open SBIR topics found."
+
+    if unique_results:
+        return "\n".join(unique_results)
+    elif api_errors:
+        return f"SBIR.gov API unavailable ({unique_errors[0]}). Check https://www.sbir.gov/api for status."
+    else:
+        return "No open SBIR topics found matching search keywords."
 
 def search_grants_gov(keywords):
     print(f"\nSearching Grants.gov for open opportunities...")

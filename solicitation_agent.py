@@ -1,6 +1,13 @@
 import anthropic
-import urllib.request
+import requests
+import socket
 from dotenv import load_dotenv
+
+# Force IPv4 — api.sam.gov TLS handshake hangs over IPv6
+_orig_getaddrinfo = socket.getaddrinfo
+def _ipv4_only(*args, **kwargs):
+    return [r for r in _orig_getaddrinfo(*args, **kwargs) if r[0] == socket.AF_INET]
+socket.getaddrinfo = _ipv4_only
 load_dotenv()
 import json
 from datetime import datetime, timedelta
@@ -98,18 +105,19 @@ def search_sam_by_naics(naics_codes):
     seen_ids = set()
 
     for naics in naics_codes:
-        url = f"https://api.sam.gov/prod/opportunities/v2/search?api_key={sam_api_key}&naics={naics}&limit=25&postedFrom={six_months_ago}&postedTo={today}&ptype=o,k,p,r,s"
+        url = f"https://api.sam.gov/opportunities/v2/search?api_key={sam_api_key}&naics={naics}&limit=25&postedFrom={six_months_ago}&postedTo={today}&ptype=o,k,p,r,s"
         try:
-            with urllib.request.urlopen(url) as response:
-                data = json.loads(response.read())
-                opportunities = data.get("opportunitiesData", [])
-                for opp in opportunities:
-                    notice_id = opp.get("noticeId")
-                    if notice_id not in seen_ids:
-                        seen_ids.add(notice_id)
-                        all_opportunities.append(opp)
-        except urllib.error.HTTPError as e:
-            print(f"Error searching NAICS {naics}: {e.code}")
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            opportunities = data.get("opportunitiesData", [])
+            for opp in opportunities:
+                notice_id = opp.get("noticeId")
+                if notice_id not in seen_ids:
+                    seen_ids.add(notice_id)
+                    all_opportunities.append(opp)
+        except Exception as e:
+            print(f"Error searching NAICS {naics}: {e}")
 
     return all_opportunities
 
@@ -120,19 +128,18 @@ def search_sbir(keywords):
     for keyword in keywords:
         url = f"https://api.www.sbir.gov/public/api/topics?keyword={keyword.replace(' ', '%20')}&status=open"
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(request) as response:
-                data = json.loads(response.read())
-                topics = data if isinstance(data, list) else data.get("topics", [])
-                for topic in topics[:5]:
-                    results.append(
-                        f"Title: {topic.get('topic_title', 'N/A')}\n"
-                        f"Agency: {topic.get('program_year', 'N/A')} - {topic.get('agency', 'N/A')}\n"
-                        f"Branch: {topic.get('branch', 'N/A')}\n"
-                        f"Topic #: {topic.get('topic_number', 'N/A')}\n"
-                        f"Description: {str(topic.get('tech_abstract', 'N/A'))[:300]}\n"
-                        f"Link: https://www.sbir.gov/node/{topic.get('nid', '')}\n"
-                    )
+            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+            data = response.json()
+            topics = data if isinstance(data, list) else data.get("topics", [])
+            for topic in topics[:5]:
+                results.append(
+                    f"Title: {topic.get('topic_title', 'N/A')}\n"
+                    f"Agency: {topic.get('program_year', 'N/A')} - {topic.get('agency', 'N/A')}\n"
+                    f"Branch: {topic.get('branch', 'N/A')}\n"
+                    f"Topic #: {topic.get('topic_number', 'N/A')}\n"
+                    f"Description: {str(topic.get('tech_abstract', 'N/A'))[:300]}\n"
+                    f"Link: https://www.sbir.gov/node/{topic.get('nid', '')}\n"
+                )
         except Exception as e:
             print(f"Error searching SBIR for '{keyword}': {str(e)}")
     
@@ -147,8 +154,7 @@ def search_sbir(keywords):
 
 def search_grants_gov(keywords):
     print(f"\nSearching Grants.gov for open opportunities...")
-    import urllib.request
-    
+
     all_results = []
     seen_ids = set()
     
@@ -156,31 +162,22 @@ def search_grants_gov(keywords):
     
     for agency in agencies:
         url = "https://api.grants.gov/v1/api/search2"
-        payload = json.dumps({
+        payload = {
             "keyword": " ".join(keywords[:3]),
             "oppStatuses": "posted|forecasted",
             "agencies": agency,
             "rows": 10,
             "sortBy": "openDate|desc"
-        }).encode("utf-8")
-        
+        }
         try:
-            request = urllib.request.Request(
-                url,
-                data=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0"
-                }
-            )
-            with urllib.request.urlopen(request) as response:
-                data = json.loads(response.read())
-                opportunities = data.get("data", {}).get("oppHits", [])
-                for opp in opportunities:
-                    opp_id = opp.get("id")
-                    if opp_id not in seen_ids:
-                        seen_ids.add(opp_id)
-                        all_results.append(opp)
+            response = requests.post(url, json=payload, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+            data = response.json()
+            opportunities = data.get("data", {}).get("oppHits", [])
+            for opp in opportunities:
+                opp_id = opp.get("id")
+                if opp_id not in seen_ids:
+                    seen_ids.add(opp_id)
+                    all_results.append(opp)
         except Exception as e:
             print(f"Error searching Grants.gov for {agency}: {str(e)}")
     
@@ -388,7 +385,7 @@ grants_results = search_grants_gov(["building envelope", "energy retrofit", "ins
 print(f"Grants.gov search complete.")
 
 message = client.messages.create(
-    model="claude-opus-4-5",
+    model="claude-opus-4-8",
     max_tokens=2048,
     messages=[
         {"role": "user", "content": f"""You are a government contracting analyst preparing a weekly funding intelligence brief for Branch Technology, a small business based in Chattanooga, TN. Branch has two core offerings:

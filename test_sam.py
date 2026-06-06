@@ -1,8 +1,11 @@
 import urllib.request
 import json
+import os
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
-api_key = "SAM-3c4666d7-9d24-4d8d-b40f-7752e0e25206"
+load_dotenv()
+api_key = os.environ.get("SAM_API_KEY")
 today = datetime.today().strftime("%m/%d/%Y")
 ninety_days_ago = (datetime.today() - timedelta(days=90)).strftime("%m/%d/%Y")
 

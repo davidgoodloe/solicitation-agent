@@ -1,30 +1,40 @@
+import socket
+
 import anthropic
 import requests
-import socket
 from dotenv import load_dotenv
 
 # Force IPv4 — api.sam.gov TLS handshake hangs over IPv6
 _orig_getaddrinfo = socket.getaddrinfo
+
+
 def _ipv4_only(*args, **kwargs):
     return [r for r in _orig_getaddrinfo(*args, **kwargs) if r[0] == socket.AF_INET]
+
+
 socket.getaddrinfo = _ipv4_only
 load_dotenv()
 import json
-from datetime import datetime, timedelta
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
 import os
 import smtplib
+import sys
+from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-import sys
+
 import markdown as md
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 
-sys.stdout.reconfigure(encoding='utf-8')
+sys.stdout.reconfigure(encoding="utf-8")
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
 
 def get_google_credentials():
     creds = None
@@ -40,59 +50,116 @@ def get_google_credentials():
             token.write(creds.to_json())
     return creds
 
+
 def save_to_sheets(creds, report_text, sam_count, overlap_count):
     service = build("sheets", "v4", credentials=creds)
 
     spreadsheet_id = os.environ.get("GOOGLE_SHEET_ID")
 
     if not spreadsheet_id:
-        spreadsheet = service.spreadsheets().create(body={
-            "properties": {"title": "Branch Technology - Solicitation Reports"},
-            "sheets": [{"properties": {"title": "Reports"}}]
-        }).execute()
+        spreadsheet = (
+            service.spreadsheets()
+            .create(
+                body={
+                    "properties": {"title": "Branch Technology - Solicitation Reports"},
+                    "sheets": [{"properties": {"title": "Reports"}}],
+                }
+            )
+            .execute()
+        )
         spreadsheet_id = spreadsheet["spreadsheetId"]
-        print(f"Created new Google Sheet: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
+        print(
+            f"Created new Google Sheet: https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+        )
         print(f"Add this to your .env: GOOGLE_SHEET_ID={spreadsheet_id}")
 
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
             range="Reports!A1:E1",
             valueInputOption="RAW",
-            body={"values": [["Date", "SAM Results", "Keyword Overlaps", "Summary", "Full Report"]]}
+            body={
+                "values": [
+                    [
+                        "Date",
+                        "SAM Results",
+                        "Keyword Overlaps",
+                        "Summary",
+                        "Full Report",
+                    ]
+                ]
+            },
         ).execute()
-    
+
     # Extract first 500 chars as summary
     summary = report_text[:500].replace("\n", " ").strip()
-    
+
     # Append new row
     service.spreadsheets().values().append(
         spreadsheetId=spreadsheet_id,
         range="Reports!A:E",
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
-        body={"values": [[
-            datetime.today().strftime("%Y-%m-%d"),
-            sam_count,
-            overlap_count,
-            summary,
-            report_text
-        ]]}
+        body={
+            "values": [
+                [
+                    datetime.today().strftime("%Y-%m-%d"),
+                    sam_count,
+                    overlap_count,
+                    summary,
+                    report_text,
+                ]
+            ]
+        },
     ).execute()
-    
-    print(f"Report saved to Google Sheets: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
+
+    print(
+        f"Report saved to Google Sheets: https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+    )
+
 
 client = anthropic.Anthropic()
 
 sam_api_key = os.environ.get("SAM_API_KEY")
 
 NAICS_CODES = ["236220", "238310", "541330", "541712", "541715", "238190", "332311"]
-KEYWORDS = ["envelope", "insulation", "retrofit", "additive", "3D print", "weatheriz", "energy effici", "building", "prefabricated", "modular", "rapid construction", "innovative construction", "building retrofit", "facility modernization", "energy resilience", "renovation", "enclosure", "cladding", "facade", "panel", "building modernization", "facility renovation", "energy conservation", "deep energy", "thermal envelope", "prefabricated construction", "modular building", "MILCON", "ESPC"]
+KEYWORDS = [
+    "envelope",
+    "insulation",
+    "retrofit",
+    "additive",
+    "3D print",
+    "weatheriz",
+    "energy effici",
+    "building",
+    "prefabricated",
+    "modular",
+    "rapid construction",
+    "innovative construction",
+    "building retrofit",
+    "facility modernization",
+    "energy resilience",
+    "renovation",
+    "enclosure",
+    "cladding",
+    "facade",
+    "panel",
+    "building modernization",
+    "facility renovation",
+    "energy conservation",
+    "deep energy",
+    "thermal envelope",
+    "prefabricated construction",
+    "modular building",
+    "MILCON",
+    "ESPC",
+]
+
 
 def search_sam_by_naics(naics_codes):
     today = datetime.today().strftime("%m/%d/%Y")
     ninety_days_ago = (datetime.today() - timedelta(days=90)).strftime("%m/%d/%Y")
     six_months_ago = (datetime.today() - timedelta(days=180)).strftime("%m/%d/%Y")
-    
+
     all_opportunities = []
     seen_ids = set()
 
@@ -113,6 +180,7 @@ def search_sam_by_naics(naics_codes):
 
     return all_opportunities
 
+
 def search_sbir(keywords):
     print(f"\nSearching SBIR.gov for open topics...")
     results = []
@@ -121,12 +189,18 @@ def search_sbir(keywords):
     for keyword in keywords:
         url = f"https://api.www.sbir.gov/public/api/topics?keyword={keyword.replace(' ', '%20')}&status=open"
         try:
-            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+            response = requests.get(
+                url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30
+            )
             if response.status_code == 403:
-                api_errors.append(f"403 Forbidden — API may require authentication or be under maintenance")
+                api_errors.append(
+                    f"403 Forbidden — API may require authentication or be under maintenance"
+                )
                 break
             elif response.status_code != 200:
-                api_errors.append(f"HTTP {response.status_code} for keyword '{keyword}'")
+                api_errors.append(
+                    f"HTTP {response.status_code} for keyword '{keyword}'"
+                )
                 continue
             data = response.json()
             if isinstance(data, dict) and "message" in data:
@@ -165,14 +239,15 @@ def search_sbir(keywords):
     else:
         return "No open SBIR topics found matching search keywords."
 
+
 def search_grants_gov(keywords):
     print(f"\nSearching Grants.gov for open opportunities...")
 
     all_results = []
     seen_ids = set()
-    
+
     agencies = ["DOE", "DOD", "NASA"]
-    
+
     for agency in agencies:
         url = "https://api.grants.gov/v1/api/search2"
         payload = {
@@ -180,10 +255,12 @@ def search_grants_gov(keywords):
             "oppStatuses": "posted|forecasted",
             "agencies": agency,
             "rows": 10,
-            "sortBy": "openDate|desc"
+            "sortBy": "openDate|desc",
         }
         try:
-            response = requests.post(url, json=payload, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+            response = requests.post(
+                url, json=payload, headers={"User-Agent": "Mozilla/5.0"}, timeout=30
+            )
             data = response.json()
             opportunities = data.get("data", {}).get("oppHits", [])
             for opp in opportunities:
@@ -193,10 +270,10 @@ def search_grants_gov(keywords):
                     all_results.append(opp)
         except Exception as e:
             print(f"Error searching Grants.gov for {agency}: {str(e)}")
-    
+
     if not all_results:
         return "No results found on Grants.gov."
-    
+
     results = []
     for opp in all_results:
         results.append(
@@ -208,13 +285,15 @@ def search_grants_gov(keywords):
             f"Award Ceiling: ${opp.get('awardCeiling', 'N/A')}\n"
             f"Link: https://grants.gov/search-results-detail/{opp.get('id', '')}\n"
         )
-    
+
     return "\n".join(results)
+
 
 def score_opportunity(opp):
     title = opp.get("title", "").lower()
     keyword_matches = [kw for kw in KEYWORDS if kw.lower() in title]
     return len(keyword_matches)
+
 
 def format_opportunities(opportunities):
     if not opportunities:
@@ -235,21 +314,22 @@ def format_opportunities(opportunities):
         )
     return "\n".join(results)
 
+
 def send_email_report(report_text, sheet_url):
     sender = os.environ.get("GMAIL_SENDER")
     recipient = os.environ.get("GMAIL_RECIPIENT")
     password = os.environ.get("GMAIL_APP_PASSWORD")
-    
+
     today = datetime.today().strftime("%B %d, %Y")
-    
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"Branch Technology Solicitation Report — {today}"
     msg["From"] = sender
     msg["To"] = recipient
-    
+
     # Convert markdown to HTML
     report_html = md.markdown(report_text, extensions=["tables"])
-    
+
     html = f"""
 <html>
 <head>
@@ -362,12 +442,12 @@ def send_email_report(report_text, sheet_url):
 </body>
 </html>
 """
-    
+
     plain_text = f"Branch Technology Solicitation Report — {today}\n\n{report_text}\n\nFull report: {sheet_url}"
-    
+
     msg.attach(MIMEText(plain_text, "plain"))
     msg.attach(MIMEText(html, "html"))
-    
+
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender, password)
@@ -375,6 +455,7 @@ def send_email_report(report_text, sheet_url):
         print(f"Report emailed to {recipient}")
     except Exception as e:
         print(f"Email error: {str(e)}")
+
 
 topic = """I'm looking for government funding solicitations that cater well to Branch Technology's offering of BranchRegenerate - a 3D printed, digital scan-to-print energy retrofit product for overcladding existing buildings for better insulation and therefore energy efficiency. I'm also interested generally in construction technology solicitations that might fit well with Branch's large-format additive prefabrication manufacturing process, Cellular Fabrication."""
 
@@ -385,23 +466,57 @@ opportunities = search_sam_by_naics(NAICS_CODES)
 opportunities.sort(key=score_opportunity, reverse=True)
 
 overlap_count = sum(1 for opp in opportunities if score_opportunity(opp) > 0)
-print(f"Found {len(opportunities)} opportunities ({overlap_count} with keyword overlap)")
+print(
+    f"Found {len(opportunities)} opportunities ({overlap_count} with keyword overlap)"
+)
 
 sam_results = format_opportunities(opportunities)
 
 print("\nAsking Claude to analyze the results...\n")
 
-sbir_keywords = ["building envelope", "insulation", "additive manufacturing", "construction", "energy retrofit", "building modernization", "facility renovation", "energy conservation", "thermal envelope", "prefabricated construction", "modular building", "MILCON", "ESPC", "deep energy retrofit", "cladding", "facade"]
+sbir_keywords = [
+    "building envelope",
+    "insulation",
+    "additive manufacturing",
+    "construction",
+    "energy retrofit",
+    "building modernization",
+    "facility renovation",
+    "energy conservation",
+    "thermal envelope",
+    "prefabricated construction",
+    "modular building",
+    "MILCON",
+    "ESPC",
+    "deep energy retrofit",
+    "cladding",
+    "facade",
+]
 sbir_results = search_sbir(sbir_keywords)
 print(f"Found SBIR topics, analyzing...")
-grants_results = search_grants_gov(["building envelope", "energy retrofit", "insulation", "additive manufacturing", "building modernization", "energy conservation", "thermal envelope", "prefabricated construction", "facility renovation", "deep energy retrofit"])
+grants_results = search_grants_gov(
+    [
+        "building envelope",
+        "energy retrofit",
+        "insulation",
+        "additive manufacturing",
+        "building modernization",
+        "energy conservation",
+        "thermal envelope",
+        "prefabricated construction",
+        "facility renovation",
+        "deep energy retrofit",
+    ]
+)
 print(f"Grants.gov search complete.")
 
 message = client.messages.create(
     model="claude-opus-4-8",
     max_tokens=2048,
     messages=[
-        {"role": "user", "content": f"""You are a government contracting analyst preparing a weekly funding intelligence brief for Branch Technology, a small business based in Chattanooga, TN. Branch has two core offerings:
+        {
+            "role": "user",
+            "content": f"""You are a government contracting analyst preparing a weekly funding intelligence brief for Branch Technology, a small business based in Chattanooga, TN. Branch has two core offerings:
 1. BranchRegenerate - a 3D-printed, scan-to-print energy retrofit system for overcladding existing buildings to improve insulation and energy efficiency
 2. Cellular Fabrication - a large-format additive manufacturing process for prefabricated construction components
 
@@ -426,16 +541,20 @@ SBIR.gov open topics:
 {sbir_results}
 
 Grants.gov open opportunities:
-{grants_results}"""}
-    ]
+{grants_results}""",
+        }
+    ],
 )
 
 import re
+
 output = message.content[0].text
-output = re.sub(r'[^\x00-\x7F]+', '', output)
-print(output.encode('utf-8', errors='replace').decode('utf-8'))
+output = re.sub(r"[^\x00-\x7F]+", "", output)
+print(output.encode("utf-8", errors="replace").decode("utf-8"))
 
 creds = get_google_credentials()
-sheet_url = f"https://docs.google.com/spreadsheets/d/{os.environ.get('GOOGLE_SHEET_ID')}"
+sheet_url = (
+    f"https://docs.google.com/spreadsheets/d/{os.environ.get('GOOGLE_SHEET_ID')}"
+)
 save_to_sheets(creds, output, len(opportunities), overlap_count)
 send_email_report(output, sheet_url)

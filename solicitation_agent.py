@@ -14,8 +14,10 @@ def _ipv4_only(*args, **kwargs):
 
 socket.getaddrinfo = _ipv4_only
 load_dotenv()
+import html
 import json
 import os
+import re
 import smtplib
 import sys
 from datetime import datetime, timedelta
@@ -240,22 +242,72 @@ def search_sbir(keywords):
         return "No open SBIR topics found matching search keywords."
 
 
+def search_dsip(keywords):
+    print(f"\nSearching DSIP (DoD SBIR/STTR Innovation Portal) for open topics...")
+    url = "https://www.dodsbirsttr.mil/topics/api/public/topics/search"
+
+    # The portal's keyword search ranks against its ~30k-topic historical archive,
+    # not the small set of currently open topics — so pull the open set directly
+    # (it's small, typically a few dozen) and score it locally instead.
+    try:
+        response = requests.get(
+            url,
+            params={"searchParam": json.dumps({}), "size": 200},
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        return f"DSIP unavailable ({str(e)}). Check https://www.dodsbirsttr.mil/ for status."
+
+    open_topics = [
+        t for t in data.get("data", []) if t.get("topicStatus") in ("Open", "Pre-Release")
+    ]
+
+    def keyword_matches(topic):
+        title = topic.get("topicTitle", "").lower()
+        return [kw for kw in keywords if kw.lower() in title]
+
+    relevant = [t for t in open_topics if keyword_matches(t)]
+    relevant.sort(key=lambda t: len(keyword_matches(t)), reverse=True)
+
+    if not open_topics:
+        return "No open or pre-release DSIP topics currently posted."
+
+    shown = relevant if relevant else open_topics
+    note = "" if relevant else " (none matched search keywords — showing all currently open topics)"
+
+    results = [
+        f"Currently {len(open_topics)} open/pre-release DSIP topics{note}:\n"
+    ]
+    for topic in shown:
+        code = topic.get("topicCode")
+        results.append(
+            f"Title: {topic.get('topicTitle', 'N/A')}\n"
+            f"Status: {topic.get('topicStatus', 'N/A')}\n"
+            f"Component: {topic.get('component', 'N/A')}\n"
+            f"Topic #: {code or 'N/A'}\n"
+            f"Solicitation: {topic.get('solicitationTitle', 'N/A')}\n"
+            f"Link: https://www.dodsbirsttr.mil/topics-app/ (search for topic # {code})\n"
+        )
+
+    return "\n".join(results)
+
+
 def search_grants_gov(keywords):
     print(f"\nSearching Grants.gov for open opportunities...")
 
     all_results = []
     seen_ids = set()
 
-    agencies = ["DOE", "DOD", "NASA"]
+    url = "https://api.grants.gov/v1/api/search2"
 
-    for agency in agencies:
-        url = "https://api.grants.gov/v1/api/search2"
+    for keyword in keywords:
         payload = {
-            "keyword": " ".join(keywords[:3]),
+            "keyword": keyword,
             "oppStatuses": "posted|forecasted",
-            "agencies": agency,
             "rows": 10,
-            "sortBy": "openDate|desc",
         }
         try:
             response = requests.post(
@@ -269,21 +321,156 @@ def search_grants_gov(keywords):
                     seen_ids.add(opp_id)
                     all_results.append(opp)
         except Exception as e:
-            print(f"Error searching Grants.gov for {agency}: {str(e)}")
+            print(f"Error searching Grants.gov for '{keyword}': {str(e)}")
 
     if not all_results:
         return "No results found on Grants.gov."
 
     results = []
     for opp in all_results:
+        title = html.unescape(opp.get("title", "N/A"))
         results.append(
-            f"Title: {opp.get('title', 'N/A')}\n"
-            f"Agency: {opp.get('agencyName', 'N/A')}\n"
+            f"Title: {title}\n"
+            f"Agency: {opp.get('agency', 'N/A')} ({opp.get('agencyCode', 'N/A')})\n"
             f"Status: {opp.get('oppStatus', 'N/A')}\n"
             f"Open Date: {opp.get('openDate', 'N/A')}\n"
             f"Close Date: {opp.get('closeDate', 'N/A')}\n"
-            f"Award Ceiling: ${opp.get('awardCeiling', 'N/A')}\n"
             f"Link: https://grants.gov/search-results-detail/{opp.get('id', '')}\n"
+        )
+
+    return "\n".join(results)
+
+
+def search_hud():
+    print(f"\nSearching HUD PD&R Funding Opportunities page...")
+    url = "https://www.huduser.gov/portal/ota/funding-opportunities.html"
+
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        html = response.text
+    except Exception as e:
+        return f"HUD PD&R Funding Opportunities page unavailable ({str(e)}). Check {url}."
+
+    anchor = html.find("Welcome to the Funding Opportunities page")
+    if anchor == -1:
+        return "Could not locate the funding opportunities listing on the HUD PD&R page."
+    section = html[anchor : anchor + 30000]
+
+    # Each opportunity sits in its own <h2-4>...</h2-4> heading followed by body
+    # text up to the next heading — split on heading boundaries to pair them up.
+    parts = re.split(r"(<h[2-4][^>]*>.*?</h[2-4]>)", section, flags=re.S)
+
+    def clean(html_fragment):
+        text = re.sub(r"<[^>]+>", " ", html_fragment)
+        text = re.sub(r"&[a-zA-Z#0-9]+;|\s+", " ", text).strip()
+        return text
+
+    results = []
+    for i in range(1, len(parts) - 1, 2):
+        title = clean(parts[i])
+        body = clean(parts[i + 1])
+        body = re.sub(r"^Funding Opportunity Title:.*?--> ?", "", body)
+
+        if not title or title == "Quick Links" or len(body) < 50:
+            continue
+
+        results.append(
+            f"Title: {title}\n"
+            f"Agency: HUD — Office of Policy Development and Research (PD&R)\n"
+            f"Description: {body[:400]}\n"
+            f"Link: {url}\n"
+        )
+
+    # This page is small and hand-curated by HUD PD&R, so pass everything through
+    # rather than keyword-filtering — let the analyst judge relevance.
+    if results:
+        return "\n".join(results)
+    else:
+        return f"No funding opportunities currently listed on the HUD PD&R page ({url})."
+
+
+def search_eere(keywords):
+    print(f"\nSearching DOE EERE eXCHANGE for funding announcements...")
+    url = "https://eere-exchange.energy.gov/Default.aspx"
+
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        page_html = response.text
+    except Exception as e:
+        return f"DOE EERE eXCHANGE unavailable ({str(e)}). Check {url}."
+
+    rows = re.findall(
+        r'<tr[^>]*class="[^"]*dxgvDataRow[^"]*"[^>]*>(.*?)</tr>', page_html, re.S
+    )
+
+    announcements = []
+    for row in rows:
+        cells = re.findall(r'<td[^>]*class="dxgv"[^>]*>(.*?)</td>', row, re.S)
+        values = []
+        for cell in cells:
+            text = re.sub(r"<[^>]+>", " ", cell)
+            text = re.sub(r"&[a-zA-Z#0-9]+;|\s+", " ", text).strip()
+            values.append(text)
+        if len(values) < 4:
+            continue
+
+        number, title, announcement_type, program_office = values[0], values[1], values[2], values[3]
+        if announcement_type in ("Teaming Partner List", "Notice of Intent to Publish Announcement (NOI)"):
+            continue
+
+        foa_id_match = re.search(r"#FoaId([0-9a-fA-F-]+)", row)
+        link = (
+            f"https://eere-exchange.energy.gov/Default.aspx?foaId={foa_id_match.group(1)}"
+            if foa_id_match
+            else url
+        )
+
+        announcements.append(
+            {
+                "number": number,
+                "title": title,
+                "type": announcement_type,
+                "program_office": program_office,
+                "link": link,
+            }
+        )
+
+    def keyword_matches(announcement):
+        haystack = f"{announcement['title']} {announcement['program_office']}".lower()
+        return [kw for kw in keywords if kw.lower() in haystack]
+
+    relevant = [a for a in announcements if keyword_matches(a)]
+    relevant.sort(key=lambda a: len(keyword_matches(a)), reverse=True)
+
+    if not announcements:
+        return f"Could not parse any announcements from DOE EERE eXCHANGE ({url})."
+    if not relevant:
+        return f"No keyword matches among the {len(announcements)} current DOE EERE eXCHANGE announcements."
+
+    results = []
+    for a in relevant:
+        results.append(
+            f"Title: {a['title']}\n"
+            f"Type: {a['type']}\n"
+            f"Program Office: {a['program_office']}\n"
+            f"Announcement #: {a['number']}\n"
+            f"Link: {a['link']}\n"
         )
 
     return "\n".join(results)
@@ -494,6 +681,12 @@ sbir_keywords = [
 ]
 sbir_results = search_sbir(sbir_keywords)
 print(f"Found SBIR topics, analyzing...")
+dsip_results = search_dsip(sbir_keywords)
+print(f"DSIP search complete.")
+hud_results = search_hud()
+print(f"HUD PD&R search complete.")
+eere_results = search_eere(KEYWORDS)
+print(f"DOE EERE eXCHANGE search complete.")
 grants_results = search_grants_gov(
     [
         "building envelope",
@@ -540,13 +733,20 @@ SAM.gov (sorted by relevance, KEYWORD + NAICS MATCH results first):
 SBIR.gov open topics:
 {sbir_results}
 
+DSIP (DoD SBIR/STTR Innovation Portal) open topics:
+{dsip_results}
+
+HUD PD&R Funding Opportunities:
+{hud_results}
+
+DOE EERE eXCHANGE announcements:
+{eere_results}
+
 Grants.gov open opportunities:
 {grants_results}""",
         }
     ],
 )
-
-import re
 
 output = message.content[0].text
 output = re.sub(r"[^\x00-\x7F]+", "", output)

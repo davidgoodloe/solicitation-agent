@@ -42,32 +42,24 @@ def get_google_credentials():
 
 def save_to_sheets(creds, report_text, sam_count, overlap_count):
     service = build("sheets", "v4", credentials=creds)
-    drive_service = build("drive", "v3", credentials=creds)
-    
-    spreadsheet_id_file = "sheet_id.txt"
-    spreadsheet_id = None
-    
-    if os.path.exists(spreadsheet_id_file):
-        with open(spreadsheet_id_file, "r") as f:
-            spreadsheet_id = f.read().strip()
-    
+
+    spreadsheet_id = os.environ.get("GOOGLE_SHEET_ID")
+
     if not spreadsheet_id:
         spreadsheet = service.spreadsheets().create(body={
             "properties": {"title": "Branch Technology - Solicitation Reports"},
             "sheets": [{"properties": {"title": "Reports"}}]
         }).execute()
         spreadsheet_id = spreadsheet["spreadsheetId"]
-        with open(spreadsheet_id_file, "w") as f:
-            f.write(spreadsheet_id)
-        
-        # Add headers
+        print(f"Created new Google Sheet: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
+        print(f"Add this to your .env: GOOGLE_SHEET_ID={spreadsheet_id}")
+
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
             range="Reports!A1:E1",
             valueInputOption="RAW",
             body={"values": [["Date", "SAM Results", "Keyword Overlaps", "Summary", "Full Report"]]}
         ).execute()
-        print(f"Created new Google Sheet: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
     
     # Extract first 500 chars as summary
     summary = report_text[:500].replace("\n", " ").strip()

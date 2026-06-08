@@ -1,7 +1,6 @@
 credentials.json
 token.json
 output_log.txt
-sheet_id.txt
 .env
 GoogleSheets_client_secret.txt
 venv/

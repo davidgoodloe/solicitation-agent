@@ -504,7 +504,7 @@ def format_opportunities(opportunities):
 
 def send_email_report(report_text, sheet_url):
     sender = os.environ.get("GMAIL_SENDER")
-    recipient = os.environ.get("GMAIL_RECIPIENT")
+    recipients = [r.strip() for r in os.environ.get("GMAIL_RECIPIENT", "").split(",") if r.strip()]
     password = os.environ.get("GMAIL_APP_PASSWORD")
 
     today = datetime.today().strftime("%B %d, %Y")
@@ -512,7 +512,7 @@ def send_email_report(report_text, sheet_url):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"Branch Technology Solicitation Report — {today}"
     msg["From"] = sender
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipients)
 
     # Convert markdown to HTML
     report_html = md.markdown(report_text, extensions=["tables"])
@@ -638,8 +638,8 @@ def send_email_report(report_text, sheet_url):
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender, password)
-            server.sendmail(sender, recipient, msg.as_string())
-        print(f"Report emailed to {recipient}")
+            server.sendmail(sender, recipients, msg.as_string())
+        print(f"Report emailed to {', '.join(recipients)}")
     except Exception as e:
         print(f"Email error: {str(e)}")
 

@@ -157,6 +157,53 @@ KEYWORDS = [
 ]
 
 
+def parse_date_safe(value, fmt=None):
+    """Best-effort date parsing that never raises — returns None on any failure
+    so a single unexpected date format can't take down the whole run."""
+    if not value:
+        return None
+    try:
+        if fmt:
+            return datetime.strptime(value, fmt)
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def is_past_due(dt):
+    if dt is None:
+        return False
+    return dt.date() < datetime.today().date()
+
+
+def fmt_date(dt):
+    return dt.strftime("%B %d, %Y") if dt else None
+
+
+def sam_deadline(opp):
+    return parse_date_safe(opp.get("responseDeadLine"))
+
+
+def fetch_sam_description(opp, max_chars=600):
+    """Best-effort fetch of the full solicitation text so Claude can judge real
+    application (not just shared process vocabulary). Never raises — returns
+    None on any failure, so callers just fall back to no description."""
+    desc_url = opp.get("description")
+    if not desc_url:
+        return None
+    try:
+        r = requests.get(f"{desc_url}&api_key={sam_api_key}", timeout=15)
+        r.raise_for_status()
+        raw = r.json().get("description", "")
+        if not raw:
+            return None
+        text = re.sub(r"<[^>]+>", " ", raw)
+        text = re.sub(r"&[a-zA-Z#0-9]+;|\s+", " ", text).strip()
+        return text[:max_chars] or None
+    except Exception:
+        return None
+
+
 def search_sam_by_naics(naics_codes):
     today = datetime.today().strftime("%m/%d/%Y")
     ninety_days_ago = (datetime.today() - timedelta(days=90)).strftime("%m/%d/%Y")
@@ -179,6 +226,13 @@ def search_sam_by_naics(naics_codes):
                     all_opportunities.append(opp)
         except Exception as e:
             print(f"Error searching NAICS {naics}: {e}")
+
+    try:
+        all_opportunities = [
+            opp for opp in all_opportunities if not is_past_due(sam_deadline(opp))
+        ]
+    except Exception:
+        pass
 
     return all_opportunities
 
@@ -242,6 +296,16 @@ def search_sbir(keywords):
         return "No open SBIR topics found matching search keywords."
 
 
+def dsip_deadline(topic):
+    raw = topic.get("topicEndDate")
+    if not raw:
+        return None
+    try:
+        return datetime.fromtimestamp(raw / 1000)
+    except Exception:
+        return None
+
+
 def search_dsip(keywords):
     print(f"\nSearching DSIP (DoD SBIR/STTR Innovation Portal) for open topics...")
     url = "https://www.dodsbirsttr.mil/topics/api/public/topics/search"
@@ -265,6 +329,11 @@ def search_dsip(keywords):
         t for t in data.get("data", []) if t.get("topicStatus") in ("Open", "Pre-Release")
     ]
 
+    try:
+        open_topics = [t for t in open_topics if not is_past_due(dsip_deadline(t))]
+    except Exception:
+        pass
+
     def keyword_matches(topic):
         title = topic.get("topicTitle", "").lower()
         return [kw for kw in keywords if kw.lower() in title]
@@ -283,16 +352,60 @@ def search_dsip(keywords):
     ]
     for topic in shown:
         code = topic.get("topicCode")
+        due_str = fmt_date(dsip_deadline(topic)) or "Not listed (verify on portal)"
         results.append(
             f"Title: {topic.get('topicTitle', 'N/A')}\n"
             f"Status: {topic.get('topicStatus', 'N/A')}\n"
             f"Component: {topic.get('component', 'N/A')}\n"
             f"Topic #: {code or 'N/A'}\n"
+            f"Due Date: {due_str}\n"
             f"Solicitation: {topic.get('solicitationTitle', 'N/A')}\n"
             f"Link: https://www.dodsbirsttr.mil/topics-app/ (search for topic # {code})\n"
         )
 
     return "\n".join(results)
+
+
+def grants_deadline(raw):
+    return parse_date_safe(raw, "%m/%d/%Y")
+
+
+# Grants.gov's applicantEligibilityDesc is a comma-separated list drawn from a
+# fixed, official category taxonomy — these substrings are the categories a
+# for-profit small business like Branch actually falls under.
+BRANCH_ELIGIBLE_CATEGORIES = (
+    "small business",
+    "for profit organizations",
+    "unrestricted",
+    "other (see text field",
+)
+
+
+def fetch_grants_eligibility(opp_id):
+    """Best-effort fetch of Grants.gov's structured eligible-applicants field.
+    Never raises — returns None on any failure, so the caller keeps the item
+    rather than guessing at eligibility it can't confirm."""
+    try:
+        r = requests.post(
+            "https://api.grants.gov/v1/api/fetchOpportunity",
+            json={"opportunityId": int(opp_id)},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json().get("data", {}).get("synopsis", {}).get("applicantEligibilityDesc")
+    except Exception:
+        return None
+
+
+def branch_ineligible(eligibility_desc):
+    """Conservative by design: only excludes when eligibility text is present
+    AND names none of Branch's own applicant categories. Missing/unparseable/
+    ambiguous text is left alone (kept) rather than risk hiding a real fit."""
+    if not eligibility_desc:
+        return False
+    text = eligibility_desc.lower()
+    return not any(cat in text for cat in BRANCH_ELIGIBLE_CATEGORIES)
 
 
 def search_grants_gov(keywords):
@@ -323,22 +436,54 @@ def search_grants_gov(keywords):
         except Exception as e:
             print(f"Error searching Grants.gov for '{keyword}': {str(e)}")
 
+    try:
+        all_results = [
+            opp for opp in all_results if not is_past_due(grants_deadline(opp.get("closeDate")))
+        ]
+    except Exception:
+        pass
+
+    # Fetch eligibility only for the (already date-filtered) survivors — one
+    # extra call each, but this is a weekly batch job so the added time is fine.
+    kept_results = []
+    for opp in all_results:
+        eligibility = fetch_grants_eligibility(opp.get("id"))
+        if branch_ineligible(eligibility):
+            continue
+        opp["_eligibility"] = eligibility
+        kept_results.append(opp)
+    all_results = kept_results
+
     if not all_results:
         return "No results found on Grants.gov."
 
     results = []
     for opp in all_results:
         title = html.unescape(opp.get("title", "N/A"))
+        due_str = fmt_date(grants_deadline(opp.get("closeDate"))) or "Not listed (rolling — verify on portal)"
+        eligibility_line = (
+            f"Eligible Applicants: {opp['_eligibility']}\n" if opp.get("_eligibility") else ""
+        )
         results.append(
             f"Title: {title}\n"
             f"Agency: {opp.get('agency', 'N/A')} ({opp.get('agencyCode', 'N/A')})\n"
             f"Status: {opp.get('oppStatus', 'N/A')}\n"
             f"Open Date: {opp.get('openDate', 'N/A')}\n"
-            f"Close Date: {opp.get('closeDate', 'N/A')}\n"
+            f"Due Date: {due_str}\n"
+            f"{eligibility_line}"
             f"Link: https://grants.gov/search-results-detail/{opp.get('id', '')}\n"
         )
 
     return "\n".join(results)
+
+
+def hud_due_date(body):
+    match = re.search(
+        r"Application (?:Close|Due) Date:\s*([A-Za-z]+\s+\d{1,2},?\s+\d{4})", body
+    )
+    if not match:
+        return None
+    return parse_date_safe(match.group(1).replace(",", ""), "%B %d %Y")
 
 
 def search_hud():
@@ -383,9 +528,18 @@ def search_hud():
         if not title or title == "Quick Links" or len(body) < 50:
             continue
 
+        try:
+            due_dt = hud_due_date(body)
+        except Exception:
+            due_dt = None
+        if is_past_due(due_dt):
+            continue
+        due_str = fmt_date(due_dt) or "Not listed (rolling — verify on portal)"
+
         results.append(
             f"Title: {title}\n"
             f"Agency: HUD — Office of Policy Development and Research (PD&R)\n"
+            f"Due Date: {due_str}\n"
             f"Description: {body[:400]}\n"
             f"Link: {url}\n"
         )
@@ -396,6 +550,50 @@ def search_hud():
         return "\n".join(results)
     else:
         return f"No funding opportunities currently listed on the HUD PD&R page ({url})."
+
+
+# Column order for the 4 deadline cells that follow Program in each EERE table row
+EERE_DEADLINE_STAGES = ["RFI Deadline", "LOI Deadline", "CP Deadline", "FA Deadline"]
+
+
+def eere_parse_deadline(raw):
+    if not raw:
+        return None
+    return parse_date_safe(raw.replace(" ET", "").strip(), "%m/%d/%Y %I:%M %p")
+
+
+def eere_deadline_info(values):
+    """Never raises — returns (exclude, next_deadline_str, all_stages_str),
+    defaulting to 'keep it, no deadline info' if anything is unexpected."""
+    try:
+        stage_cells = values[4:8] if len(values) >= 8 else []
+        stages = [
+            (label, raw_val, eere_parse_deadline(raw_val))
+            for label, raw_val in zip(EERE_DEADLINE_STAGES, stage_cells)
+            if raw_val
+        ]
+
+        parsed_dts = [dt for _, _, dt in stages if dt]
+        exclude = bool(parsed_dts) and is_past_due(max(parsed_dts))
+
+        upcoming = sorted(
+            [(dt, label) for label, _, dt in stages if dt and not is_past_due(dt)],
+            key=lambda pair: pair[0],
+        )
+        next_deadline_str = (
+            f"{upcoming[0][1]}: {fmt_date(upcoming[0][0])}" if upcoming else None
+        )
+
+        all_stages_str = (
+            "; ".join(
+                f"{label}: {fmt_date(dt) if dt else raw_val}" for label, raw_val, dt in stages
+            )
+            if stages
+            else None
+        )
+        return exclude, next_deadline_str, all_stages_str
+    except Exception:
+        return False, None, None
 
 
 def search_eere(keywords):
@@ -434,6 +632,10 @@ def search_eere(keywords):
         if announcement_type in ("Teaming Partner List", "Notice of Intent to Publish Announcement (NOI)"):
             continue
 
+        exclude, next_deadline_str, all_stages_str = eere_deadline_info(values)
+        if exclude:
+            continue
+
         foa_id_match = re.search(r"#FoaId([0-9a-fA-F-]+)", row)
         link = (
             f"https://eere-exchange.energy.gov/Default.aspx?foaId={foa_id_match.group(1)}"
@@ -448,6 +650,8 @@ def search_eere(keywords):
                 "type": announcement_type,
                 "program_office": program_office,
                 "link": link,
+                "next_deadline": next_deadline_str,
+                "all_deadlines": all_stages_str,
             }
         )
 
@@ -465,11 +669,16 @@ def search_eere(keywords):
 
     results = []
     for a in relevant:
+        due_line = a["next_deadline"] or "Not listed (verify on portal)"
+        stages_line = (
+            f"\nAll Stage Deadlines: {a['all_deadlines']}" if a["all_deadlines"] else ""
+        )
         results.append(
             f"Title: {a['title']}\n"
             f"Type: {a['type']}\n"
             f"Program Office: {a['program_office']}\n"
             f"Announcement #: {a['number']}\n"
+            f"Next Deadline (may disqualify if missed): {due_line}{stages_line}\n"
             f"Link: {a['link']}\n"
         )
 
@@ -489,14 +698,25 @@ def format_opportunities(opportunities):
     for opp in opportunities:
         score = score_opportunity(opp)
         match_label = "🎯 KEYWORD + NAICS MATCH" if score > 0 else "NAICS match only"
+        due_str = fmt_date(sam_deadline(opp)) or "Not listed (verify on portal)"
+
+        # Only worth the extra fetch for the small subset that already scored
+        # a keyword+NAICS hit — Claude needs real content to judge these fairly.
+        description_line = ""
+        if score > 0:
+            desc = fetch_sam_description(opp)
+            if desc:
+                description_line = f"Description: {desc}\n"
+
         results.append(
             f"[{match_label}]\n"
             f"Title: {opp.get('title', 'N/A')}\n"
             f"Agency: {opp.get('fullParentPathName', 'N/A')}\n"
             f"Type: {opp.get('type', 'N/A')}\n"
-            f"Deadline: {opp.get('responseDeadLine', 'N/A')}\n"
+            f"Due Date: {due_str}\n"
             f"NAICS: {opp.get('naicsCode', 'N/A')}\n"
             f"Set-Aside: {opp.get('typeOfSetAsideDescription', 'N/A')}\n"
+            f"{description_line}"
             f"Link: {opp.get('uiLink', 'N/A')}\n"
         )
     return "\n".join(results)
@@ -719,9 +939,15 @@ Today's date is {datetime.today().strftime("%B %d, %Y")}. Use this date in the r
 
 Format your response as a clean, concise weekly brief with these sections only:
 1. **This Week's Summary** - 2-3 sentences max on what was found
-2. **Top Opportunities** - only include genuinely relevant ones, with agency, deadline, set-aside status, why it fits, and link
+2. **Top Opportunities** - only include genuinely relevant ones, with agency, due date, set-aside status, why it fits, and link
 3. **Worth Monitoring** - brief list of lower-priority items worth a second look
 4. **Recommended Actions** - 3-5 specific, actionable items for this week
+
+Every opportunity you list under Top Opportunities or Worth Monitoring must state its due date exactly as given in the search results below (or "rolling / not listed" if that's how it's labeled) — do not omit it, and do not guess one. The results below already exclude anything already past its due date, so nothing further needs to be filtered on that basis.
+
+When judging fit, require the opportunity's actual described application to genuinely involve buildings, construction, or energy-retrofit/envelope work. Sharing a process term like "additive manufacturing" or "3D print" with an unrelated end use (e.g., tooling, fixtures, currency, aerospace parts, medical devices) is not sufficient on its own — name the real described application in your "why it fits" reasoning, not just the shared process term.
+
+Where a result includes an "Eligible Applicants" line, take it at face value: if it does not plausibly include a for-profit small business like Branch, exclude that opportunity entirely rather than listing it with a caveat.
 
 Do not include a list of irrelevant opportunities. Do not repeat the company description back. No excessive headers or whitespace between sections.
 
@@ -752,9 +978,17 @@ output = message.content[0].text
 output = re.sub(r"[^\x00-\x7F]+", "", output)
 print(output.encode("utf-8", errors="replace").decode("utf-8"))
 
-creds = get_google_credentials()
 sheet_url = (
     f"https://docs.google.com/spreadsheets/d/{os.environ.get('GOOGLE_SHEET_ID')}"
 )
-save_to_sheets(creds, output, len(opportunities), overlap_count)
+try:
+    creds = get_google_credentials()
+    save_to_sheets(creds, output, len(opportunities), overlap_count)
+except Exception as e:
+    print(f"Google Sheets archiving failed: {e}")
+    output = (
+        f"**Warning: Google Sheets archiving failed this run ({e}). "
+        f"This report was not saved to the archive — check token.json / credentials.**\n\n{output}"
+    )
+
 send_email_report(output, sheet_url)

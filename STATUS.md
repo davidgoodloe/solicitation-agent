@@ -12,7 +12,7 @@ Ported from a prior laptop and running again. Fully operational; scheduled runs 
 - Claude synthesis into the weekly brief
 - Google Sheets archiving ([sheet](https://docs.google.com/spreadsheets/d/1mCXb2e0SyU-Fbd7O_Vficumg7XfycVm93-WwOOg8_Vs))
 - Gmail delivery to david.goodloe@branch.technology
-- Scheduled via launchd (`~/Library/LaunchAgents/com.davidgoodloe.solicitation-agent.plist`): Monday 8:00am and Wednesday 12:00pm. Logs at `~/Library/Logs/solicitation-agent/{stdout,stderr}.log`.
+- Scheduled via launchd (`~/Library/LaunchAgents/com.davidgoodloe.solicitation-agent.plist`): Monday 10:00am and Wednesday 3:00pm (retimed 2026-07-20 to hours David is reliably at his laptop, after an 8am Monday run failed with total DNS resolution failure — laptop likely asleep/off-network at trigger time). Logs at `~/Library/Logs/solicitation-agent/{stdout,stderr}.log`.
 
 ## What's Broken
 
